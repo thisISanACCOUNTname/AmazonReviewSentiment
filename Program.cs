@@ -4,12 +4,19 @@ using SentimentAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using static Microsoft.ML.DataOperationsCatalog;
-// Helper types for custom mapping
-// (moved to top of file)
+// Small notes:
+// - This file is a simple console program that trains and evaluates
+//   a binary sentiment classifier using ML.NET.
+// - Top-level statements are used so there is no explicit Program class.
+// Path to the original CSV with raw reviews.
 string _dataPath = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-micro - train-reviews-micro.csv");
 
+// Create the ML.NET context (shared across operations).
 MLContext mlContext = new MLContext();
+// Load and preprocess data, returning training and test IDataView objects.
 var splitDataView = LoadData(mlContext);
+// LoadData: read raw CSV, convert labels to boolean text, write a processed CSV,
+// then load it into an IDataView and split it into train and test sets.
 (IDataView TrainSet, IDataView TestSet) LoadData(MLContext mlContext)
 {
     // Preprocess original CSV and write a temporary CSV where the sentiment column
@@ -44,13 +51,14 @@ var splitDataView = LoadData(mlContext);
         }
     }
 
-    // Load processed CSV with boolean Label column
+    // Load processed CSV with boolean Label column into a typed IDataView
     IDataView dataView = mlContext.Data.LoadFromTextFile<SentimentData>(processed, hasHeader: true, separatorChar: ',');
 
     // Use built-in TrainTestSplit
     var split = mlContext.Data.TrainTestSplit(dataView, testFraction: 0.2);
     return (split.TrainSet, split.TestSet);
 }
+// BuildAndTrainModel: define the data processing + training pipeline and fit it
 ITransformer model = BuildAndTrainModel(mlContext, splitDataView.TrainSet);
 ITransformer BuildAndTrainModel(MLContext mlContext, IDataView splitTrainSet)
 {
@@ -59,6 +67,7 @@ ITransformer BuildAndTrainModel(MLContext mlContext, IDataView splitTrainSet)
             inputColumnName: nameof(SentimentData.SentimentText))
         .Append(mlContext.BinaryClassification.Trainers.SdcaLogisticRegression(labelColumnName: "Label", featureColumnName: "Features"));
     
+    // Train the model on the training set
     Console.WriteLine("=============== Create and Train the Model ===============");
     var model = estimator.Fit(splitTrainSet);
     Console.WriteLine("=============== End of training ===============");
@@ -66,15 +75,18 @@ ITransformer BuildAndTrainModel(MLContext mlContext, IDataView splitTrainSet)
 
     return model;
 }
+// Run evaluation and example predictions
 Evaluate(mlContext, model, splitDataView.TestSet);
 UseModelWithSingleItem(mlContext, model);
 UseModelWithBatchItems(mlContext, model);
 
 
+// Evaluate: compute metrics on the test set and print class-level correctness
 void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
 {
     Console.WriteLine("=============== Evaluating Model accuracy with Test data===============");
-    // Inspect actual label distribution in test set
+    // Inspect actual label distribution in test set. The label column might be
+    // stored as float (e.g., 2 for positive) or as bool, so we handle both.
     var schema = splitTestSet.Schema;
     int labelIndex = -1;
     for (int i = 0; i < schema.Count; i++)
@@ -100,6 +112,7 @@ void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
         }
         Console.WriteLine($"Test set distribution -> Positive: {pos}, Negative: {neg}");
     }
+    // Run the model on the test set to produce predictions
     IDataView predictions = model.Transform(splitTestSet);
 
     // Evaluate the model and show metrics
@@ -124,6 +137,8 @@ void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
         if (schemaPred[i].Name == "PredictedLabel") predColIndex = i;
     }
 
+    // If both label and predicted label columns exist, iterate rows to count
+    // how many positives/negatives were predicted correctly.
     if (labelColIndex >= 0 && predColIndex >= 0)
     {
         var labelCol = schemaPred[labelColIndex];
@@ -179,6 +194,7 @@ void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
         }
     }
 
+    // Print class-level correctness summaries
     Console.WriteLine();
     Console.WriteLine("Classification correctness by class");
     Console.WriteLine("-----------------------------------");
@@ -195,6 +211,9 @@ void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
     Console.WriteLine("=============== End of model evaluation ===============");
 }
 
+// UseModelWithSingleItem: create one temporary CSV row, run the model and
+// print the single prediction. This avoids using dynamic codegen or
+// PredictionEngine for the example.
 void UseModelWithSingleItem(MLContext mlContext, ITransformer model)
 {
     // Create a small temporary CSV to load the single sample without using PredictionEngine
@@ -238,6 +257,8 @@ void UseModelWithSingleItem(MLContext mlContext, ITransformer model)
     }
 }
 
+// UseModelWithBatchItems: write a small CSV with multiple examples, run the
+// model and print predictions for each row.
 void UseModelWithBatchItems(MLContext mlContext, ITransformer model)
 {
     // Build a temporary CSV for batch predictions and load via LoadFromTextFile to avoid dynamic code gen
