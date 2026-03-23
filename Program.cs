@@ -4,10 +4,9 @@ using SentimentAnalysis;
 using System.Collections.Generic;
 using System.Linq;
 using static Microsoft.ML.DataOperationsCatalog;
-// Small notes:
-// - This file is a simple console program that trains and evaluates
-//   a binary sentiment classifier using ML.NET.
+// Small note:
 // - Top-level statements are used so there is no explicit Program class.
+
 // Path to the original CSV with raw reviews.
 string _dataPath = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-micro - train-reviews-micro.csv");
 
