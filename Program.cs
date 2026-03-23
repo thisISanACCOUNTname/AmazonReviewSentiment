@@ -111,6 +111,87 @@ void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
     Console.WriteLine($"Accuracy: {metrics.Accuracy:P2}");
     Console.WriteLine($"Auc: {metrics.AreaUnderRocCurve:P2}");
     Console.WriteLine($"F1Score: {metrics.F1Score:P2}");
+
+    // Additionally compute percentage of correctly labeled positive and negative reviews
+    int totalPos = 0, totalNeg = 0, correctPos = 0, correctNeg = 0;
+    var schemaPred = predictions.Schema;
+    // Find column indices by name to avoid relying on API surface that may not be
+    // available in all ML.NET package versions.
+    int labelColIndex = -1, predColIndex = -1;
+    for (int i = 0; i < schemaPred.Count; i++)
+    {
+        if (schemaPred[i].Name == "Label") labelColIndex = i;
+        if (schemaPred[i].Name == "PredictedLabel") predColIndex = i;
+    }
+
+    if (labelColIndex >= 0 && predColIndex >= 0)
+    {
+        var labelCol = schemaPred[labelColIndex];
+        var predCol = schemaPred[predColIndex];
+
+        using (var cursor = predictions.GetRowCursor(new[] { labelCol, predCol }))
+        {
+            // Handle boolean label column
+            if (labelCol.Type.RawType == typeof(bool))
+            {
+                var getLabel = cursor.GetGetter<bool>(labelCol);
+                var getPred = cursor.GetGetter<bool>(predCol);
+                bool lab = false, pred = false;
+                while (cursor.MoveNext())
+                {
+                    getLabel(ref lab);
+                    getPred(ref pred);
+                    if (lab)
+                    {
+                        totalPos++;
+                        if (pred) correctPos++;
+                    }
+                    else
+                    {
+                        totalNeg++;
+                        if (!pred) correctNeg++;
+                    }
+                }
+            }
+            else if (labelCol.Type.RawType == typeof(float))
+            {
+                // Some pipelines use float labels (e.g., 2 for positive); treat ~2.0 as positive
+                var getLabel = cursor.GetGetter<float>(labelCol);
+                var getPred = cursor.GetGetter<bool>(predCol);
+                float labf = 0f; bool pred = false;
+                while (cursor.MoveNext())
+                {
+                    getLabel(ref labf);
+                    getPred(ref pred);
+                    bool labBool = Math.Abs(labf - 2f) < 0.001f;
+                    if (labBool)
+                    {
+                        totalPos++;
+                        if (pred) correctPos++;
+                    }
+                    else
+                    {
+                        totalNeg++;
+                        if (!pred) correctNeg++;
+                    }
+                }
+            }
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("Classification correctness by class");
+    Console.WriteLine("-----------------------------------");
+    if (totalPos > 0)
+        Console.WriteLine($"Positive correctly labeled: {(double)correctPos / totalPos:P2} ({correctPos}/{totalPos})");
+    else
+        Console.WriteLine("Positive correctly labeled: N/A (no positive examples in test set)");
+
+    if (totalNeg > 0)
+        Console.WriteLine($"Negative correctly labeled: {(double)correctNeg / totalNeg:P2} ({correctNeg}/{totalNeg})");
+    else
+        Console.WriteLine("Negative correctly labeled: N/A (no negative examples in test set)");
+
     Console.WriteLine("=============== End of model evaluation ===============");
 }
 
