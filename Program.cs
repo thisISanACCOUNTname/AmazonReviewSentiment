@@ -1,0 +1,200 @@
+﻿using Microsoft.ML;
+using Microsoft.ML.Data;
+using SentimentAnalysis;
+using System.Collections.Generic;
+using System.Linq;
+using static Microsoft.ML.DataOperationsCatalog;
+// Helper types for custom mapping
+// (moved to top of file)
+string _dataPath = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-micro - train-reviews-micro.csv");
+
+MLContext mlContext = new MLContext();
+var splitDataView = LoadData(mlContext);
+(IDataView TrainSet, IDataView TestSet) LoadData(MLContext mlContext)
+{
+    // Preprocess original CSV and write a temporary CSV where the sentiment column
+    // is converted to boolean strings (true for positive=2, false for negative=1).
+    var original = _dataPath;
+    var processed = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-processed.csv");
+    if (!File.Exists(processed))
+    {
+        var lines = File.ReadAllLines(original);
+        if (lines.Length > 0)
+        {
+            var header = lines[0];
+            var output = new List<string>(lines.Length);
+            output.Add(header); // keep header
+            for (int i = 1; i < lines.Length; i++)
+            {
+                var line = lines[i];
+                // Split only on first two commas to preserve commas in text
+                var parts = line.Split(new[] { ',' }, 3);
+                if (parts.Length >= 3)
+                {
+                    var label = parts[0].Trim();
+                    var mapped = (label == "2") ? "true" : "false";
+                    output.Add(string.Join(",", mapped, parts[1], parts[2]));
+                }
+                else
+                {
+                    output.Add(line);
+                }
+            }
+            File.WriteAllLines(processed, output);
+        }
+    }
+
+    // Load processed CSV with boolean Label column
+    IDataView dataView = mlContext.Data.LoadFromTextFile<SentimentData>(processed, hasHeader: true, separatorChar: ',');
+
+    // Use built-in TrainTestSplit
+    var split = mlContext.Data.TrainTestSplit(dataView, testFraction: 0.2);
+    return (split.TrainSet, split.TestSet);
+}
+ITransformer model = BuildAndTrainModel(mlContext, splitDataView.TrainSet);
+ITransformer BuildAndTrainModel(MLContext mlContext, IDataView splitTrainSet)
+{
+    var estimator = mlContext.Transforms.Text.FeaturizeText(
+            outputColumnName: "Features",
+            inputColumnName: nameof(SentimentData.SentimentText))
+        .Append(mlContext.BinaryClassification.Trainers.SdcaLogisticRegression(labelColumnName: "Label", featureColumnName: "Features"));
+    
+    Console.WriteLine("=============== Create and Train the Model ===============");
+    var model = estimator.Fit(splitTrainSet);
+    Console.WriteLine("=============== End of training ===============");
+    Console.WriteLine();
+
+    return model;
+}
+Evaluate(mlContext, model, splitDataView.TestSet);
+UseModelWithSingleItem(mlContext, model);
+UseModelWithBatchItems(mlContext, model);
+
+
+void Evaluate(MLContext mlContext, ITransformer model, IDataView splitTestSet)
+{
+    Console.WriteLine("=============== Evaluating Model accuracy with Test data===============");
+    // Inspect actual label distribution in test set
+    var schema = splitTestSet.Schema;
+    int labelIndex = -1;
+    for (int i = 0; i < schema.Count; i++)
+        if (schema[i].Name == "Label" || schema[i].Name == "Sentiment") { labelIndex = i; break; }
+    if (labelIndex >= 0)
+    {
+        var labelCol = schema[labelIndex];
+        int pos = 0, neg = 0;
+        using (var cursor = splitTestSet.GetRowCursor(new[] { labelCol }))
+        {
+            if (labelCol.Type.RawType == typeof(float))
+            {
+                var get = cursor.GetGetter<float>(labelCol);
+                float v = 0f;
+                while (cursor.MoveNext()) { get(ref v); if (Math.Abs(v - 2f) < 0.001f) pos++; else neg++; }
+            }
+            else if (labelCol.Type.RawType == typeof(bool))
+            {
+                var get = cursor.GetGetter<bool>(labelCol);
+                bool v = false;
+                while (cursor.MoveNext()) { get(ref v); if (v) pos++; else neg++; }
+            }
+        }
+        Console.WriteLine($"Test set distribution -> Positive: {pos}, Negative: {neg}");
+    }
+    IDataView predictions = model.Transform(splitTestSet);
+
+    // Evaluate the model and show metrics
+    CalibratedBinaryClassificationMetrics metrics = mlContext.BinaryClassification.Evaluate(predictions, "Label");
+
+    Console.WriteLine();
+    Console.WriteLine("Model quality metrics evaluation");
+    Console.WriteLine("--------------------------------");
+    Console.WriteLine($"Accuracy: {metrics.Accuracy:P2}");
+    Console.WriteLine($"Auc: {metrics.AreaUnderRocCurve:P2}");
+    Console.WriteLine($"F1Score: {metrics.F1Score:P2}");
+    Console.WriteLine("=============== End of model evaluation ===============");
+}
+
+void UseModelWithSingleItem(MLContext mlContext, ITransformer model)
+{
+    // Create a small temporary CSV to load the single sample without using PredictionEngine
+    var processed = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-processed.csv");
+    var tempPath = Path.Combine(Environment.CurrentDirectory, "Data", "predict-single.csv");
+    string header = "sentiment,title,review_text";
+    if (File.Exists(processed))
+        header = File.ReadLines(processed).First();
+
+    // write a single-line CSV (label is dummy false)
+    File.WriteAllLines(tempPath, new[] { header, $"false,,This was a very bad steak" });
+
+    IDataView singleData = mlContext.Data.LoadFromTextFile<SentimentData>(tempPath, hasHeader: true, separatorChar: ',');
+    IDataView predictions = model.Transform(singleData);
+
+    // Read predicted fields via cursor to avoid CreatePredictionEngine/CreateEnumerable
+    var schema = predictions.Schema;
+    var predCol = schema["PredictedLabel"];
+    var probCol = schema["Probability"];
+    var textCol = schema["SentimentText"];
+
+    using (var cursor = predictions.GetRowCursor(new[] { predCol, probCol, textCol }))
+    {
+        var getPred = cursor.GetGetter<bool>(predCol);
+        var getProb = cursor.GetGetter<float>(probCol);
+        var getText = cursor.GetGetter<ReadOnlyMemory<char>>(textCol);
+        bool p = false; float prob = 0f; ReadOnlyMemory<char> txt = default;
+        while (cursor.MoveNext())
+        {
+            getText(ref txt);
+            getPred(ref p);
+            getProb(ref prob);
+
+            Console.WriteLine();
+            Console.WriteLine("=============== Prediction Test of model with a single sample and test dataset ===============");
+            Console.WriteLine();
+            Console.WriteLine($"Sentiment: {txt.ToString()} | Prediction: {(p ? "Positive" : "Negative")} | Probability: {prob} ");
+            Console.WriteLine("=============== End of Predictions ===============");
+            Console.WriteLine();
+        }
+    }
+}
+
+void UseModelWithBatchItems(MLContext mlContext, ITransformer model)
+{
+    // Build a temporary CSV for batch predictions and load via LoadFromTextFile to avoid dynamic code gen
+    var processed = Path.Combine(Environment.CurrentDirectory, "Data", "train-reviews-processed.csv");
+    var tempPath = Path.Combine(Environment.CurrentDirectory, "Data", "predict-batch.csv");
+    string header = "sentiment,title,review_text";
+    if (File.Exists(processed))
+        header = File.ReadLines(processed).First();
+
+    var lines = new List<string> { header };
+    lines.Add("false,,This was a horrible meal");
+    lines.Add("false,,I love this spaghetti.");
+    File.WriteAllLines(tempPath, lines);
+
+    IDataView batchData = mlContext.Data.LoadFromTextFile<SentimentData>(tempPath, hasHeader: true, separatorChar: ',');
+    IDataView predictions = model.Transform(batchData);
+
+    var schema = predictions.Schema;
+    var predCol = schema["PredictedLabel"];
+    var probCol = schema["Probability"];
+    var textCol = schema["SentimentText"];
+
+    Console.WriteLine();
+    Console.WriteLine("=============== Prediction Test of loaded model with multiple samples ===============");
+
+    using (var cursor = predictions.GetRowCursor(new[] { predCol, probCol, textCol }))
+    {
+        var getPred = cursor.GetGetter<bool>(predCol);
+        var getProb = cursor.GetGetter<float>(probCol);
+        var getText = cursor.GetGetter<ReadOnlyMemory<char>>(textCol);
+        bool p = false; float prob = 0f; ReadOnlyMemory<char> txt = default;
+        while (cursor.MoveNext())
+        {
+            getText(ref txt);
+            getPred(ref p);
+            getProb(ref prob);
+            Console.WriteLine($"Sentiment: {txt.ToString()} | Prediction: {(p ? "Positive" : "Negative")} | Probability: {prob} ");
+        }
+    }
+    Console.WriteLine("=============== End of predictions ===============");
+}
